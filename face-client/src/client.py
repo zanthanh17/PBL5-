@@ -265,6 +265,7 @@ def main():
     sensor_led_pin = sensor_cfg.get("led_pin", 18)
     sensor_trigger_distance = sensor_cfg.get("trigger_distance", 100.0)
     sensor_led_duration = sensor_cfg.get("led_on_duration", 10.0)
+    sensor_check_interval = sensor_cfg.get("check_interval", 0.2)
     
     sensor = None
     if sensor_enabled:
@@ -273,7 +274,8 @@ def main():
             echo_pin=sensor_echo_pin,
             led_pin=sensor_led_pin,
             trigger_distance=sensor_trigger_distance,
-            led_on_duration=sensor_led_duration
+            led_on_duration=sensor_led_duration,
+            check_interval=sensor_check_interval
         )
         
         # Callbacks khi phát hiện người

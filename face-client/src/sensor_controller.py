@@ -367,24 +367,30 @@ def test_led():
         GPIO.cleanup()
 
 
-def test_controller():
-    """Test full sensor controller"""
+def test_controller(check_interval: float = 5.0):
+    """
+    Test full sensor controller
+    
+    Args:
+        check_interval: Thời gian giữa các lần đo (giây), default 5.0s
+    """
     print("Testing Sensor Controller...")
     print("WIRING:")
     print("  HC-SR04 TRIG -> GPIO 23")
     print("  HC-SR04 ECHO -> GPIO 24")
     print("  MOSFET Gate  -> GPIO 18")
     print("")
+    print(f"Check interval: {check_interval}s")
     print("Move your hand in front of sensor (< 100cm)...")
     print("LED should turn on when person detected")
     print("Press Ctrl+C to stop")
     print("")
     
     def on_detected(distance):
-        print(f">>> Person detected at {distance}cm - LED ON")
+        print(f">>> [{time.strftime('%H:%M:%S')}] Person detected at {distance}cm - LED ON")
     
     def on_left():
-        print(f">>> Person left - LED OFF")
+        print(f">>> [{time.strftime('%H:%M:%S')}] Person left - LED OFF")
     
     controller = SensorController(
         trig_pin=23,
@@ -392,7 +398,7 @@ def test_controller():
         led_pin=18,
         trigger_distance=100.0,
         led_on_duration=5.0,
-        check_interval=0.2
+        check_interval=check_interval
     )
     
     controller.set_on_person_detected(on_detected)
@@ -400,6 +406,7 @@ def test_controller():
     controller.start()
     
     try:
+        print(f"Monitoring started (checking every {check_interval}s)...")
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
@@ -417,13 +424,29 @@ if __name__ == "__main__":
         format='%(asctime)s [%(levelname)s] %(message)s'
     )
     
+    # Parse arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "sensor":
             test_sensor()
         elif sys.argv[1] == "led":
             test_led()
+        elif sys.argv[1] == "controller":
+            # Check if interval is provided
+            interval = float(sys.argv[2]) if len(sys.argv) > 2 else 5.0
+            test_controller(check_interval=interval)
         else:
-            test_controller()
+            # Try to parse as interval for backward compatibility
+            try:
+                interval = float(sys.argv[1])
+                test_controller(check_interval=interval)
+            except ValueError:
+                print("Usage:")
+                print("  python3 sensor_controller.py                    # Test với interval 5s")
+                print("  python3 sensor_controller.py 5                  # Test với interval 5s")
+                print("  python3 sensor_controller.py controller 3       # Test với interval 3s")
+                print("  python3 sensor_controller.py sensor             # Test chỉ sensor")
+                print("  python3 sensor_controller.py led                # Test chỉ LED")
     else:
-        test_controller()
+        # Default: test với interval 5s
+        test_controller(check_interval=5.0)
 

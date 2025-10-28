@@ -38,6 +38,7 @@ sensor:
   led_pin: 18     # GPIO pin cho MOSFET Gate (BCM)
   trigger_distance: 100.0   # Khoảng cách kích hoạt LED (cm)
   led_on_duration: 10.0     # Thời gian bật LED (giây)
+  check_interval: 0.2       # Thời gian giữa các lần đo (giây) - 0.2s = real-time
 
 jobs:
   poll_min_sec: 1
