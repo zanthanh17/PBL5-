@@ -1,0 +1,6 @@
+opencv-python
+numpy
+requests
+PyYAML
+picamera2 ; sys_platform == 'linux'
+tflite-runtime ; sys_platform == 'linux'

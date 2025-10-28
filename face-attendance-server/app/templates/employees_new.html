@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Thêm nhân viên</h2>
+<form method="post" action="/employees/new" enctype="multipart/form-data" class="form">
+    <label>Mã nhân viên</label>
+    <input type="text" name="emp_id" required>
+
+    <label>Họ tên</label>
+    <input type="text" name="full_name" required>
+
+    <label>Phòng ban</label>
+    <input type="text" name="dept">
+
+    <label>Ảnh đại diện (tuỳ chọn)</label>
+    <input type="file" name="photo" accept="image/*">
+
+    <button type="submit">Lưu</button>
+    <a class="btn" href="/employees">Huỷ</a>
+</form>
+{% endblock %}

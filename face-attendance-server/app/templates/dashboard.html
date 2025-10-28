@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-subtitle">Quản lý chấm công nhận diện khuôn mặt</p>
+</div>
+
+<form class="filters" method="get" action="/dashboard">
+    <div class="filter-group">
+        <label>Tên Nhân Viên</label>
+        <input type="text" name="emp_name" value="{{ emp_name or '' }}" placeholder="Tìm theo tên nhân viên">
+    </div>
+
+    <div class="filter-group">
+        <label>Từ ngày</label>
+        <input type="date" name="date_from" value="{{ date_from or '' }}">
+    </div>
+
+    <div class="filter-group">
+        <label>Đến ngày</label>
+        <input type="date" name="date_to" value="{{ date_to or '' }}">
+    </div>
+
+    <div class="filter-group">
+        <label>Quyết định</label>
+        <select name="decision">
+            <option value="" {{ ''==decision and 'selected' or '' }}>Tất cả</option>
+            <option value="accepted" {{ decision=='accepted' and 'selected' or '' }}>Accepted</option>
+            <option value="reject" {{ decision=='reject' and 'selected' or '' }}>Reject</option>
+        </select>
+    </div>
+
+    <button type="submit" class="btn btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+        </svg>
+        Lọc
+    </button>
+
+    <a class="btn btn-secondary"
+        href="/v1/attendance/export.csv?emp_id={{ emp_id or '' }}&emp_name={{ emp_name or '' }}&date_from={{ date_from or '' }}&date_to={{ date_to or '' }}{% if decision %}&decision={{ decision }}{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        Tải CSV
+    </a>
+</form>
+
+<div class="table-container">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Thời gian (VN)</th>
+                <th>Nhân viên</th>
+                <th>Phòng ban</th>
+                <th>Decision</th>
+                <th>Score</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td>{{ r.ts_local }}</td>
+                <td>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        {% if r.photo_path %}
+                        <img src="{{ r.photo_path }}" alt="avatar"
+                            style="width:40px;height:40px;object-fit:cover;border-radius:10px;">
+                        {% else %}
+                        <div
+                            style="width:40px;height:40px;border-radius:10px;background:#e0f2f1;color:#0f9d58;display:flex;align-items:center;justify-content:center;font-weight:600;">
+                            {{ r.initials }}
+                        </div>
+                        {% endif %}
+                        <div>
+                            {% if r.full_name %}
+                            <div style="font-weight:600;">{{ r.full_name }}</div>
+                            {% endif %}
+                            {% if r.emp_id %}
+                            <a href="/employees/{{ r.emp_id }}" class="emp-link">{{ r.emp_id }}</a>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </td>
+                <td>{{ r.dept or '-' }}</td>
+                <td>
+                    {% if r.decision == 'accepted' %}
+                    <span class="badge badge--ok">accepted</span>
+                    {% else %}
+                    <span class="badge badge--err">reject</span>
+                    {% endif %}
+                </td>
+                <td>{{ "%.2f"|format(r.score or 0) }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center text-muted">Không có bản ghi</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pager">
+    {% if page > 1 %}
+    <a href="/dashboard?{{ qstr }}&page={{ page-1 }}" class="pager-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+        Trước
+    </a>
+    {% endif %}
+
+    <span class="pager-info">Trang {{ page }}</span>
+
+    {% if has_more %}
+    <a href="/dashboard?{{ qstr }}&page={{ page+1 }}" class="pager-btn">
+        Sau
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+    </a>
+    {% endif %}
+</div>
+{% endblock %}

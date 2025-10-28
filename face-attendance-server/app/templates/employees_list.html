@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Nhân viên</h2>
+<form method="get" action="/employees" class="filters">
+    <input type="text" name="q" placeholder="Tìm theo mã, tên, phòng ban" value="{{ q }}">
+    <button type="submit">Tìm</button>
+    <a class="btn" href="/employees/new">+ Thêm nhân viên</a>
+</form>
+
+<table class="table">
+    <thead>
+        <tr>
+            <th>Ảnh</th>
+            <th>Mã</th>
+            <th>Họ tên</th>
+            <th>Phòng ban</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in rows %}
+        <tr>
+            <td>
+                {% if r.photo_path %}
+                <img src="{{ r.photo_path }}" alt="avatar"
+                    style="width:48px;height:48px;object-fit:cover;border-radius:8px;">
+                {% else %}
+                —
+                {% endif %}
+            </td>
+            <td>{{ r.emp_id }}</td>
+            <td>{{ r.full_name }}</td>
+            <td>{{ r.dept or '-' }}</td>
+            <td><a href="/employees/{{ r.emp_id }}">Chi tiết</a></td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="5">Không có dữ liệu</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="pager">
+    {% if page>1 %}<a href="/employees?q={{ q }}&page={{ page-1 }}">&laquo; Trước</a>{% endif %}
+    <span>Trang {{ page }}</span>
+    {% if has_more %}<a href="/employees?q={{ q }}&page={{ page+1 }}">Sau &raquo;</a>{% endif %}
+</div>
+{% endblock %}

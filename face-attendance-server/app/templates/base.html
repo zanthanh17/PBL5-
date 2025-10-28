@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="vi">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{{ title or "Face Attendance" }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='main.css') }}">
+</head>
+
+<body>
+    <header class="topbar">
+        <div class="topbar__inner">
+            <!-- Brand Logo -->
+            <a class="topbar__brand" href="/dashboard">
+                <span class="topbar__logo">FA</span>
+                <span class="topbar__title">Face Attendance</span>
+            </a>
+
+            <!-- Navigation -->
+            <nav class="topbar__nav" aria-label="Main navigation" id="mainNav">
+                <ul>
+                    <li>
+                        <a href="/dashboard"
+                            class="topbar__link{% if request.url.path.startswith('/dashboard') %} is-active{% endif %}">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <rect x="3" y="3" width="7" height="7"></rect>
+                                <rect x="14" y="3" width="7" height="7"></rect>
+                                <rect x="14" y="14" width="7" height="7"></rect>
+                                <rect x="3" y="14" width="7" height="7"></rect>
+                            </svg>
+                            Dashboard
+                        </a>
+                    </li>
+                    <li>
+                        <a href="/employees"
+                            class="topbar__link{% if request.url.path.startswith('/employees') %} is-active{% endif %}">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                <circle cx="9" cy="7" r="4"></circle>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                            </svg>
+                            Employees
+                        </a>
+                    </li>
+                    <li>
+                        <a href="/reports"
+                            class="topbar__link{% if request.url.path.startswith('/reports') %} is-active{% endif %}">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <line x1="18" y1="20" x2="18" y2="10"></line>
+                                <line x1="12" y1="20" x2="12" y2="4"></line>
+                                <line x1="6" y1="20" x2="6" y2="14"></line>
+                            </svg>
+                            Reports
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+
+            <!-- User Section -->
+            <div class="topbar__user">
+                <!-- <div class="topbar__notifications">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                    </svg>
+                    <!-- <span class="notification-badge">3</span> -->
+                <!-- </div>  -->
+
+                <div class="topbar__profile">
+                    <div class="profile-avatar">AD</div>
+                    <div class="profile-info">
+                        <div class="profile-name">Admin</div>
+                        <div class="profile-role">Administrator</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mobile Menu Toggle -->
+            <button class="topbar__menu-toggle" id="menuToggle" aria-label="Toggle menu">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <script>
+        // Mobile menu toggle
+        const menuToggle = document.getElementById('menuToggle');
+        const mainNav = document.getElementById('mainNav');
+
+        if (menuToggle && mainNav) {
+            menuToggle.addEventListener('click', () => {
+                mainNav.classList.toggle('is-open');
+            });
+
+            // Close menu when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!menuToggle.contains(e.target) && !mainNav.contains(e.target)) {
+                    mainNav.classList.remove('is-open');
+                }
+            });
+        }
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,51 @@
+# Face Attendance Server specific ignores
+
+# Uploads and user data
+uploads/
+static/uploads/
+photos/
+*.jpg
+*.jpeg
+*.png
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Config with sensitive data
+config/local.yaml
+config/production.yaml
+.env.local
+.env.production
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+
+# Backup files
+*.bak
+*.backup
+backup/

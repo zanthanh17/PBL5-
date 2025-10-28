@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap;">
+    <div>
+        {% if e.photo_path %}
+        <img src="{{ e.photo_path }}" alt="avatar"
+            style="width:120px;height:120px;object-fit:cover;border-radius:12px;">
+        {% else %}
+        <div
+            style="width:120px;height:120px;background:#eee;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#888;">
+            No Photo
+        </div>
+        {% endif %}
+    </div>
+
+    <div>
+        <h2>{{ e.full_name }} <small style="color:#666;">({{ e.emp_id }})</small></h2>
+        <div>Phòng ban: <b>{{ e.dept or '-' }}</b></div>
+
+        <!-- Form cập nhật -->
+        <form method="post" action="/employees/{{ e.emp_id }}/edit" enctype="multipart/form-data" class="form"
+            style="margin-top:12px;">
+            <label>Họ tên</label>
+            <input type="text" name="full_name" value="{{ e.full_name }}" required>
+
+            <label>Phòng ban</label>
+            <input type="text" name="dept" value="{{ e.dept or '' }}">
+
+            <label>Đổi ảnh (tuỳ chọn)</label>
+            <input type="file" name="photo" accept="image/*">
+
+            <button type="submit">Cập nhật</button>
+            <a class="btn" href="/employees/{{ e.emp_id }}/export.csv">Tải CSV</a>
+        </form>
+
+        <!-- Nút tạo lệnh Enroll xuống Pi -->
+        <form method="post" action="/employees/{{ e.emp_id }}/enqueue-enroll"
+            style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+            <label>Enroll trên thiết bị</label>
+            <input type="text" name="device_id" value="pi-entrance-01" required placeholder="device_id">
+            <button type="submit">Tạo lệnh Enroll</button>
+        </form>
+
+
+        <!-- Nút xoá -->
+        <form method="post" action="/employees/{{ e.emp_id }}/delete" onsubmit="return confirm('Xoá nhân viên này?')"
+            style="margin-top:8px;">
+            <button type="submit" style="background:#f33;color:#fff;padding:6px 10px;border:none;border-radius:4px;">
+                Xoá nhân viên
+            </button>
+        </form>
+    </div>
+</div>
+
+<h3 style="margin-top:20px;">Lịch sử chấm công</h3>
+<table class="table">
+    <thead>
+        <tr>
+            <th>Thời gian (VN)</th>
+            <th>Thiết bị</th>
+            <th>Type</th>
+            <th>Decision</th>
+            <th>Score</th>
+            <th>Liveness</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in rows %}
+        <tr>
+            <td>{{ r.ts_local }}</td>
+            <td>{{ r.device_id }}</td>
+            <td>{{ r.type }}</td>
+            <td>
+                {% if r.decision == 'accepted' %}
+                <span
+                    style="background:#e6ffed;color:#037b21;border:1px solid #b7efc5;border-radius:12px;padding:2px 8px;">accepted</span>
+                {% else %}
+                <span
+                    style="background:#ffecec;color:#b30000;border:1px solid #ffb3b3;border-radius:12px;padding:2px 8px;">reject</span>
+                {% endif %}
+            </td>
+            <td>{{ "%.2f"|format(r.score or 0) }}</td>
+            <td>{{ "%.2f"|format(r.liveness or 0) }}</td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="6">Chưa có bản ghi</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

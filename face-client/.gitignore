@@ -1,0 +1,46 @@
+# Face Client specific ignores
+
+# Models (too large for git)
+models/
+*.tflite
+*.pb
+*.h5
+
+# Data and photos
+data/
+photos/
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.avi
+
+# Logs
+*.log
+logs/
+
+# Config with sensitive data
+config/local.yaml
+config/production.yaml
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Reports</h1>
+    <p class="page-subtitle">Tổng hợp giờ làm theo ngày của từng nhân viên</p>
+</div>
+
+<form class="filters" method="get" action="/reports">
+    <div class="filter-group">
+        <label>Tìm nhân viên</label>
+        <input type="text" name="q" value="{{ q }}" placeholder="Nhập mã hoặc tên nhân viên">
+    </div>
+    <div class="filter-group">
+        <label>Từ ngày</label>
+        <input type="date" name="date_from" value="{{ date_from }}">
+    </div>
+    <div class="filter-group">
+        <label>Đến ngày</label>
+        <input type="date" name="date_to" value="{{ date_to }}">
+    </div>
+    <button type="submit" class="btn btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+        </svg>
+        Lọc
+    </button>
+    <a class="btn btn-secondary" style="margin-left:auto;"
+        href="/reports?q={{ q | urlencode }}&date_from={{ date_from }}&date_to={{ date_to }}&export=1">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        Xuất CSV
+    </a>
+</form>
+
+<div class="table-container">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Nhân viên</th>
+                <th>Phòng ban</th>
+                <th>Ngày</th>
+                <th>Check-in</th>
+                <th>Check-out</th>
+                <th>Số giờ</th>
+                <th>Số lần quét</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        {% if r.photo_path %}
+                        <img src="{{ r.photo_path }}" alt="avatar"
+                            style="width:48px;height:48px;object-fit:cover;border-radius:12px;">
+                        {% else %}
+                        <div
+                            style="width:48px;height:48px;border-radius:12px;background:#e0f2f1;color:#0f9d58;display:flex;align-items:center;justify-content:center;font-weight:600;">
+                            {{ r.initials }}
+                        </div>
+                        {% endif %}
+                        <div>
+                            <div style="font-weight:600;">{{ r.full_name }}</div>
+                            <a href="/employees/{{ r.emp_id }}" class="emp-link">{{ r.emp_id }}</a>
+                        </div>
+                    </div>
+                </td>
+                <td>{{ r.dept or '-' }}</td>
+                <td>{{ r.work_date }}</td>
+                <td>{{ r.checkin }}</td>
+                <td>{{ r.checkout }}</td>
+                <td title="~{{ r.duration_hours }} giờ">{{ r.duration_human }}</td>
+                <td>{{ r.total_scans }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" class="text-center text-muted">Không có dữ liệu</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="text-muted" style="margin-top:12px;">
+    Khoảng thời gian: <strong>{{ date_from }}</strong> → <strong>{{ date_to }}</strong>
+</div>
+{% endblock %}
