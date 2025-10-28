@@ -36,8 +36,8 @@ sensor:
   trig_pin: 23    # GPIO pin cho HC-SR04 TRIG (BCM)
   echo_pin: 24    # GPIO pin cho HC-SR04 ECHO (BCM)
   led_pin: 18     # GPIO pin cho MOSFET Gate (BCM)
-  trigger_distance: 100.0   # Khoảng cách kích hoạt LED (cm)
-  led_on_duration: 10.0     # Thời gian bật LED (giây)
+  trigger_distance: 10.0    # Khoảng cách ngưỡng (cm) - LED ON khi > ngưỡng
+  led_on_duration: 10.0     # Thời gian giữ LED sáng (giây)
   check_interval: 0.2       # Thời gian giữa các lần đo (giây) - 0.2s = real-time
 
 jobs:

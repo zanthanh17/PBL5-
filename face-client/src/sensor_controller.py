@@ -162,7 +162,7 @@ class SensorController:
                  trig_pin: int = 23,
                  echo_pin: int = 24,
                  led_pin: int = 18,
-                 trigger_distance: float = 100.0,
+                 trigger_distance: float = 10.0,
                  led_on_duration: float = 10.0,
                  check_interval: float = 0.2):
         """
@@ -172,8 +172,8 @@ class SensorController:
             trig_pin: GPIO pin cho HC-SR04 TRIG (default 23)
             echo_pin: GPIO pin cho HC-SR04 ECHO (default 24)
             led_pin: GPIO pin cho LED MOSFET (default 18)
-            trigger_distance: Khoảng cách kích hoạt LED (cm), default 100cm
-            led_on_duration: Thời gian bật LED (giây), default 10s
+            trigger_distance: Khoảng cách ngưỡng (cm), LED ON khi > ngưỡng, default 10cm
+            led_on_duration: Thời gian giữ LED sáng (giây), default 10s
             check_interval: Thời gian giữa các lần đo (giây), default 0.2s
         """
         self.trigger_distance = trigger_distance
@@ -268,12 +268,12 @@ class SensorController:
                     else:
                         logger.debug(f"Distance: {distance}cm")
                     
-                    if distance <= self.trigger_distance:
-                        # Phát hiện người
+                    if distance > self.trigger_distance:
+                        # Khoảng cách > 10cm - BẬT LED
                         if not person_detected:
                             person_detected = True
                             last_detection_time = time.time()
-                            logger.info(f">>> Person detected at {distance}cm - LED ON")
+                            logger.info(f">>> Distance {distance:.2f}cm > {self.trigger_distance}cm - LED ON")
                             
                             # Bật LED
                             if self.led:
@@ -286,12 +286,12 @@ class SensorController:
                                 except Exception as e:
                                     logger.error(f"Callback error: {e}")
                         else:
-                            # Vẫn còn người, update timer
+                            # LED vẫn đang sáng, update timer
                             last_detection_time = time.time()
-                            logger.debug(f"Person still present at {distance}cm")
+                            logger.debug(f"LED still ON at {distance:.2f}cm")
                     
                     else:
-                        # Không phát hiện người
+                        # Khoảng cách <= 10cm - TẮT LED
                         if person_detected:
                             # Kiểm tra timeout
                             elapsed = time.time() - last_detection_time
@@ -299,7 +299,7 @@ class SensorController:
                             
                             if elapsed > self.led_on_duration:
                                 person_detected = False
-                                logger.info(">>> Person left - LED OFF")
+                                logger.info(f">>> Distance {distance:.2f}cm <= {self.trigger_distance}cm - LED OFF")
                                 
                                 # Tắt LED
                                 if self.led:
@@ -312,7 +312,7 @@ class SensorController:
                                     except Exception as e:
                                         logger.error(f"Callback error: {e}")
                             else:
-                                logger.debug(f"Waiting for person to leave (LED OFF in {remaining:.1f}s)")
+                                logger.debug(f"Waiting to turn OFF LED (OFF in {remaining:.1f}s)")
                 else:
                     logger.warning("Sensor reading failed (out of range?)")
                 
@@ -395,23 +395,24 @@ def test_controller(check_interval: float = 5.0):
     print("  MOSFET Gate  -> GPIO 18")
     print("")
     print(f"Check interval: {check_interval}s")
-    print("Move your hand in front of sensor (< 100cm)...")
-    print("LED should turn on when person detected")
+    print(f"Trigger distance: 10cm")
+    print("Logic: LED ON when distance > 10cm, OFF when distance <= 10cm")
+    print("Move your hand closer/farther from sensor...")
     print("Press Ctrl+C to stop")
     print("")
     
     def on_detected(distance):
-        print(f">>> [{time.strftime('%H:%M:%S')}] Person detected at {distance}cm - LED ON")
+        print(f">>> [{time.strftime('%H:%M:%S')}] Distance {distance:.2f}cm > 10cm - LED ON")
     
     def on_left():
-        print(f">>> [{time.strftime('%H:%M:%S')}] Person left - LED OFF")
+        print(f">>> [{time.strftime('%H:%M:%S')}] Distance <= 10cm - LED OFF")
     
     controller = SensorController(
         trig_pin=23,
         echo_pin=24,
         led_pin=18,
-        trigger_distance=100.0,
-        led_on_duration=5.0,
+        trigger_distance=10.0,
+        led_on_duration=10.0,
         check_interval=check_interval
     )
     

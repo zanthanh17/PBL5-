@@ -1,0 +1,33 @@
+🔌 SƠ ĐỒ ĐẤU NỐI ĐƠN GIẢN
+
+Raspberry Pi 3B+:
+┌─────────────────┐
+│  Pin 2  (5V)    │ ────► HC-SR04 VCC
+│  Pin 6  (GND)   │ ────► HC-SR04 GND
+│  Pin 16 (GPIO23)│ ────► HC-SR04 TRIG
+│  Pin 18 (GPIO24)│ ◄──── HC-SR04 ECHO (qua voltage divider)
+│  Pin 12 (GPIO18)│ ────► MOSFET Gate
+│  Pin 14 (GND)   │ ────► MOSFET Source
+└─────────────────┘
+
+HC-SR04:
+┌─────────────┐
+│ VCC   TRIG  │
+│ ECHO  GND   │
+└─────────────┘
+
+Voltage Divider (QUAN TRỌNG!):
+HC-SR04 ECHO ──┬── 1kΩ ──┬── Pi GPIO 24
+               │          │
+               │          └── 2kΩ ──► GND
+
+MOSFET + LED:
+Pi GPIO 18 ──► MOSFET Gate
+MOSFET Drain ──► LED Cathode (-)
+MOSFET Source ──► GND
+LED Anode (+) ──► Power qua Resistor
+
+⚠️ LƯU Ý:
+- ECHO PHẢI qua voltage divider (1kΩ + 2kΩ)
+- KHÔNG nối ECHO trực tiếp vào GPIO!
+- MOSFET phải là logic-level (IRLZ44N)
