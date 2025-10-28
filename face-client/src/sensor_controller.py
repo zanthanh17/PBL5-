@@ -314,7 +314,8 @@ class SensorController:
                             else:
                                 logger.debug(f"Waiting to turn OFF LED (OFF in {remaining:.1f}s)")
                 else:
-                    logger.warning("Sensor reading failed (out of range?)")
+                    # Sensor out of range - bình thường, không cần warning
+                    logger.debug("Sensor reading failed (out of range or no obstacle)")
                 
                 # Sleep
                 time.sleep(self.check_interval)
