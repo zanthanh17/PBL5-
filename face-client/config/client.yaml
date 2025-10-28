@@ -1,0 +1,46 @@
+server:
+  base_url: "http://172.20.10.2:8001"
+  timeout_sec: 3
+
+device:
+  id: "pi-entrance-01"
+
+camera:
+  width: 320  # Tối ưu tối đa cho Pi 3B+ (giảm CPU ~50%)
+  height: 240
+
+ui:
+  window_name: "Face Client (Pi3B+)"
+  show_fps: true
+
+recognition:
+  mode: "real"   # hoặc "fixed_test" để thử
+  model_path: "/home/pi/face-client/models/mobilefacenet.tflite"
+  tta_flip: false  # Tắt TTA để tăng tốc (có thể bật nếu cần accuracy cao hơn)
+  quality_min: 0.45  # Giảm để accept nhiều ảnh hơn
+  enhance_low_quality: false  # TẮT để tránh lag (chỉ bật nếu ánh sáng RẤT kém)
+  frame_skip: 3  # Chỉ xử lý 1/4 frames (tăng từ 2)
+  throttle_recognition: 0.8  # Giảm delay giữa các lần recognize
+  multi_frame_voting: true  # Bật voting để tăng accuracy
+  vote_window: 5  # Số frames để vote
+  vote_threshold: 3  # Số votes tối thiểu để accept
+
+tts:
+  enabled: true   # Bật/tắt Text-to-Speech
+  volume: 100     # Âm lượng (0-200)
+  speed: 150      # Tốc độ nói (80-450 words per minute)
+  cooldown: 3.0   # Thời gian chờ giữa 2 lần phát cùng message (giây)
+
+sensor:
+  enabled: false  # Bật/tắt HC-SR04 + LED (chỉ bật khi đã đấu nối phần cứng)
+  trig_pin: 23    # GPIO pin cho HC-SR04 TRIG (BCM)
+  echo_pin: 24    # GPIO pin cho HC-SR04 ECHO (BCM)
+  led_pin: 18     # GPIO pin cho MOSFET Gate (BCM)
+  trigger_distance: 100.0   # Khoảng cách kích hoạt LED (cm)
+  led_on_duration: 10.0     # Thời gian bật LED (giây)
+
+jobs:
+  poll_min_sec: 1
+  poll_max_sec: 15
+  enroll_timeout_sec: 30
+

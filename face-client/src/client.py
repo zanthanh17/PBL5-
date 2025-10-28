@@ -3,6 +3,8 @@ import cv2, numpy as np, requests
 from picamera2 import Picamera2
 from collections import deque, Counter
 from typing import Optional, Dict, List
+from tts_speaker import TTSSpeaker
+from sensor_controller import SensorController
 
 # ============= Logging Setup =============
 logging.basicConfig(
@@ -245,6 +247,49 @@ def main():
         tta_flip = cfg.get("recognition", {}).get("tta_flip", False)
         embedder = MobileFaceNetEmbedder(model_path, use_tta=tta_flip)   # 192d
         logger.info(f"Loaded MobileFaceNet embedder (TTA: {tta_flip})")
+    
+    # Initialize TTS Speaker
+    tts_cfg = cfg.get("tts", {})
+    tts_enabled = tts_cfg.get("enabled", True)
+    tts_volume = tts_cfg.get("volume", 100)
+    tts_speed = tts_cfg.get("speed", 150)
+    tts_cooldown = tts_cfg.get("cooldown", 3.0)
+    tts = TTSSpeaker(enabled=tts_enabled, volume=tts_volume, speed=tts_speed, cooldown=tts_cooldown)
+    logger.info(f"TTS Speaker initialized (enabled: {tts_enabled})")
+    
+    # Initialize Sensor Controller (HC-SR04 + LED)
+    sensor_cfg = cfg.get("sensor", {})
+    sensor_enabled = sensor_cfg.get("enabled", False)
+    sensor_trig_pin = sensor_cfg.get("trig_pin", 23)
+    sensor_echo_pin = sensor_cfg.get("echo_pin", 24)
+    sensor_led_pin = sensor_cfg.get("led_pin", 18)
+    sensor_trigger_distance = sensor_cfg.get("trigger_distance", 100.0)
+    sensor_led_duration = sensor_cfg.get("led_on_duration", 10.0)
+    
+    sensor = None
+    if sensor_enabled:
+        sensor = SensorController(
+            trig_pin=sensor_trig_pin,
+            echo_pin=sensor_echo_pin,
+            led_pin=sensor_led_pin,
+            trigger_distance=sensor_trigger_distance,
+            led_on_duration=sensor_led_duration
+        )
+        
+        # Callbacks khi phát hiện người
+        def on_person_detected(distance):
+            logger.info(f"Person detected at {distance}cm - LED ON")
+            tts.speak_custom("Xin chào")
+        
+        def on_person_left():
+            logger.info("Person left - LED OFF")
+        
+        sensor.set_on_person_detected(on_person_detected)
+        sensor.set_on_person_left(on_person_left)
+        sensor.start()
+        logger.info(f"Sensor Controller started (trigger={sensor_trigger_distance}cm)")
+    else:
+        logger.info("Sensor Controller disabled")
 
     # ---- Camera: tối ưu cho Pi 3B+ ----
     picam2 = Picamera2()
@@ -402,6 +447,8 @@ def main():
                                             voted_emp, voted_score = voted
                                             last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
                                             last_color = (0, 200, 0)
+                                            # TTS: Phát âm tên user
+                                            tts.speak_welcome(name)
                                         else:
                                             last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
                                             last_color = (0, 150, 150)
@@ -409,6 +456,8 @@ def main():
                                         # Không dùng voting
                                         last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
                                         last_color = (0, 200, 0)
+                                        # TTS: Phát âm tên user
+                                        tts.speak_welcome(name)
                                 else:
                                     last_msg = "OK but missing result"
                                     last_color = (0,150,150)
@@ -530,6 +579,9 @@ def main():
 
     finally:
         try:
+            if sensor:
+                sensor.cleanup()
+            tts.stop()
             picam2.stop()
         except Exception:
             pass
