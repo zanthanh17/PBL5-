@@ -269,34 +269,27 @@ def main():
     
     sensor = None
     if sensor_enabled:
-        try:
-            sensor = SensorController(
-                trig_pin=sensor_trig_pin,
-                echo_pin=sensor_echo_pin,
-                led_pin=sensor_led_pin,
-                trigger_distance=sensor_trigger_distance,
-                led_on_duration=sensor_led_duration,
-                check_interval=sensor_check_interval
-            )
-            logger.info("Sensor Controller initialized successfully")
-            
-            # Callbacks khi phát hiện người (khoảng cách > 10cm)
-            def on_person_detected(distance):
-                logger.info(f"Distance {distance:.2f}cm > 10cm - LED ON")
-                # TTS khi có người ở xa (có thể là người mới đến)
-                tts.speak_custom("Xin chào")
-            
-            def on_person_left():
-                logger.info("Distance <= 10cm - LED OFF")
-                # Không cần TTS khi người lại gần
-            
-            sensor.set_on_person_detected(on_person_detected)
-            sensor.set_on_person_left(on_person_left)
-            sensor.start()
-            logger.info(f"Sensor Controller started (trigger={sensor_trigger_distance}cm)")
-        except Exception as e:
-            logger.error(f"Failed to initialize sensor: {e}")
-            sensor = None
+        sensor = SensorController(
+            trig_pin=sensor_trig_pin,
+            echo_pin=sensor_echo_pin,
+            led_pin=sensor_led_pin,
+            trigger_distance=sensor_trigger_distance,
+            led_on_duration=sensor_led_duration,
+            check_interval=sensor_check_interval
+        )
+        
+        # Callbacks khi phát hiện người
+        def on_person_detected(distance):
+            logger.info(f"Person detected at {distance}cm - LED ON")
+            tts.speak_custom("Xin chào")
+        
+        def on_person_left():
+            logger.info("Person left - LED OFF")
+        
+        sensor.set_on_person_detected(on_person_detected)
+        sensor.set_on_person_left(on_person_left)
+        sensor.start()
+        logger.info(f"Sensor Controller started (trigger={sensor_trigger_distance}cm)")
     else:
         logger.info("Sensor Controller disabled")
 
@@ -422,16 +415,7 @@ def main():
                     cv2.rectangle(bgr, (x,y), (x+w,y+h), (0,255,0), 2)
                     face_crop = bgr[y:y+h, x:x+w].copy()
                     quality = calc_quality(face_crop)
-                    
-                    # Chỉ nhận diện khi có người ở gần (khoảng cách <= 10cm)
-                    should_recognize = True
-                    if sensor and sensor.led and not sensor.led.is_on:
-                        # LED tắt = người ở xa (>10cm), không cần nhận diện
-                        should_recognize = False
-                        last_msg = "Person too far (>10cm) - Move closer"
-                        last_color = (0, 255, 255)
-                    
-                    if should_recognize and time.time()-last_time > throttle_recog:
+                    if time.time()-last_time > throttle_recog:
                         try:
                             # Image enhancement nếu quality thấp (chỉ khi RẤT thấp để tránh lag)
                             enhance_low_quality = cfg.get("recognition", {}).get("enhance_low_quality", True)
@@ -590,13 +574,6 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2, cv2.LINE_AA)
             cv2.putText(bgr, last_msg, (10,50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, last_color, 2, cv2.LINE_AA)
-            
-            # Hiển thị trạng thái sensor
-            if sensor and sensor.led:
-                sensor_status = "LED ON (far)" if sensor.led.is_on else "LED OFF (close)"
-                sensor_color = (0, 255, 0) if sensor.led.is_on else (0, 0, 255)
-                cv2.putText(bgr, f"Sensor: {sensor_status}", (10, 80),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, sensor_color, 1, cv2.LINE_AA)
 
             cv2.imshow(window, bgr)
             if cv2.waitKey(1) & 0xFF == 27:
@@ -605,12 +582,11 @@ def main():
     finally:
         try:
             if sensor:
-                sensor.stop()
                 sensor.cleanup()
             tts.stop()
             picam2.stop()
-        except Exception as e:
-            logger.error(f"Cleanup error: {e}")
+        except Exception:
+            pass
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
