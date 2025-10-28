@@ -253,21 +253,27 @@ class SensorController:
         """Worker thread để monitor sensor"""
         person_detected = False
         last_detection_time = 0
+        check_count = 0
         
         while not self.stop_event.is_set():
             try:
                 # Đo khoảng cách
                 distance = self.sensor.get_distance()
+                check_count += 1
                 
                 if distance is not None:
-                    logger.debug(f"Distance: {distance}cm")
+                    # Log distance để user biết sensor đang hoạt động
+                    if self.check_interval >= 1.0:  # Chỉ log khi interval >= 1s
+                        logger.info(f"[Check #{check_count}] Distance: {distance:.2f}cm")
+                    else:
+                        logger.debug(f"Distance: {distance}cm")
                     
                     if distance <= self.trigger_distance:
                         # Phát hiện người
                         if not person_detected:
                             person_detected = True
                             last_detection_time = time.time()
-                            logger.info(f"Person detected at {distance}cm")
+                            logger.info(f">>> Person detected at {distance}cm - LED ON")
                             
                             # Bật LED
                             if self.led:
@@ -282,14 +288,18 @@ class SensorController:
                         else:
                             # Vẫn còn người, update timer
                             last_detection_time = time.time()
+                            logger.debug(f"Person still present at {distance}cm")
                     
                     else:
                         # Không phát hiện người
                         if person_detected:
                             # Kiểm tra timeout
-                            if time.time() - last_detection_time > self.led_on_duration:
+                            elapsed = time.time() - last_detection_time
+                            remaining = self.led_on_duration - elapsed
+                            
+                            if elapsed > self.led_on_duration:
                                 person_detected = False
-                                logger.info("Person left")
+                                logger.info(">>> Person left - LED OFF")
                                 
                                 # Tắt LED
                                 if self.led:
@@ -301,6 +311,10 @@ class SensorController:
                                         self.on_person_left()
                                     except Exception as e:
                                         logger.error(f"Callback error: {e}")
+                            else:
+                                logger.debug(f"Waiting for person to leave (LED OFF in {remaining:.1f}s)")
+                else:
+                    logger.warning("Sensor reading failed (out of range?)")
                 
                 # Sleep
                 time.sleep(self.check_interval)
