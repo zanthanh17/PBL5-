@@ -32,7 +32,7 @@ tts:
   cooldown: 3.0   # Thời gian chờ giữa 2 lần phát cùng message (giây)
 
 sensor:
-  enabled: false  # Bật/tắt HC-SR04 + LED (chỉ bật khi đã đấu nối phần cứng)
+  enabled: true   # Bật/tắt HC-SR04 + LED (chỉ bật khi đã đấu nối phần cứng)
   trig_pin: 23    # GPIO pin cho HC-SR04 TRIG (BCM)
   echo_pin: 24    # GPIO pin cho HC-SR04 ECHO (BCM)
   led_pin: 18     # GPIO pin cho MOSFET Gate (BCM)
