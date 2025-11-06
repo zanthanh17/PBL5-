@@ -3,7 +3,7 @@ import os, datetime, pytz
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "30"))   # giây
+DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "5"))   # giây - chỉ chặn spam thực sự (< 5s)
 MIN_SESSION_MIN = int(os.getenv("MIN_SESSION_MIN", "10"))
 WORKDAY_TZ = os.getenv("WORKDAY_TZ", "Asia/Ho_Chi_Minh")
 

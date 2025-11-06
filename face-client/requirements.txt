@@ -4,3 +4,4 @@ requests
 PyYAML
 picamera2 ; sys_platform == 'linux'
 tflite-runtime ; sys_platform == 'linux'
+psutil  # Optional: for adaptive frame skip (Phase 1 optimization)

@@ -1,10 +1,19 @@
 import time, threading, json, random, logging
+import queue
+from pathlib import Path
 import cv2, numpy as np, requests
 from picamera2 import Picamera2
 from collections import deque, Counter
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from tts_speaker import TTSSpeaker
 from sensor_controller import SensorController
+
+# Try import psutil for adaptive frame skip
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 # ============= Logging Setup =============
 logging.basicConfig(
@@ -15,11 +24,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============= Config & Utils =============
-def load_config(path="config/client.yaml"):
+def get_project_root():
+    """Lấy đường dẫn gốc của project (face-client/)"""
+    # File này ở: face-client/src/client.py
+    # Project root: face-client/
+    current_file = Path(__file__).resolve()
+    # current_file = /path/to/face-client/src/client.py
+    # project_root = /path/to/face-client/
+    project_root = current_file.parent.parent
+    return project_root
+
+def load_config(path=None):
+    """
+    Load config từ file YAML
+    
+    Args:
+        path: Đường dẫn đến config file. Nếu None, dùng mặc định config/client.yaml
+    """
     try:
         import yaml
     except ImportError:
         raise RuntimeError("Missing PyYAML. Install: pip install pyyaml")
+    
+    if path is None:
+        # Dùng đường dẫn mặc định: config/client.yaml từ project root
+        project_root = get_project_root()
+        path = project_root / "config" / "client.yaml"
+    else:
+        # Nếu path là string, convert sang Path và resolve
+        path = Path(path)
+        if not path.is_absolute():
+            # Nếu là đường dẫn tương đối, resolve từ project root
+            project_root = get_project_root()
+            path = project_root / path
+    
+    path = path.expanduser()  # Expand ~ trong đường dẫn
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
@@ -36,13 +75,32 @@ def find_haarcascade():
     raise FileNotFoundError("Missing haarcascade_frontalface_default.xml (sudo apt install -y opencv-data)")
 
 def calc_quality(face_bgr: np.ndarray) -> float:
-    """Tính chất lượng ảnh (brightness + sharpness)"""
+    """Tính chất lượng ảnh (brightness + sharpness) - OPTIMIZED"""
     gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
     brightness = float(np.mean(gray))
-    focus = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    
+    # OPTIMIZATION: Dùng Sobel thay vì Laplacian (nhanh hơn 2x)
+    # Sobel gradient magnitude ≈ sharpness
+    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sharpness = float(np.mean(sobel_x**2 + sobel_y**2))
+    
     b_norm = np.clip((brightness - 50) / (190 - 50), 0, 1)
-    f_norm = np.clip((focus - 80) / (400 - 80), 0, 1)
-    return float(0.5 * b_norm + 0.5 * f_norm)
+    s_norm = np.clip((sharpness - 100) / (500 - 100), 0, 1)  # Adjusted threshold for Sobel
+    return float(0.5 * b_norm + 0.5 * s_norm)
+
+def calc_quality_fast(face_gray: np.ndarray) -> float:
+    """Fast quality calculation từ gray image (tránh convert lại)"""
+    brightness = float(np.mean(face_gray))
+    
+    # Sobel gradient
+    sobel_x = cv2.Sobel(face_gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(face_gray, cv2.CV_64F, 0, 1, ksize=3)
+    sharpness = float(np.mean(sobel_x**2 + sobel_y**2))
+    
+    b_norm = np.clip((brightness - 50) / (190 - 50), 0, 1)
+    s_norm = np.clip((sharpness - 100) / (500 - 100), 0, 1)
+    return float(0.5 * b_norm + 0.5 * s_norm)
 
 def enhance_face_quality(face_bgr: np.ndarray) -> np.ndarray:
     """Enhance face image quality - FAST version cho Pi 3B+"""
@@ -120,6 +178,132 @@ class VotingBuffer:
     def clear(self):
         """Clear buffer"""
         self.buffer.clear()
+
+# ============= Phase 1 Optimizations =============
+
+class AdaptiveFrameSkip:
+    """Tự động điều chỉnh frame skip dựa trên CPU load"""
+    
+    def __init__(self, base_skip: int = 3, max_skip: int = 5, min_skip: int = 1, 
+                 check_interval: float = 2.0):
+        self.base_skip = base_skip
+        self.max_skip = max_skip
+        self.min_skip = min_skip
+        self.current_skip = base_skip
+        self.check_interval = check_interval
+        self.last_check = time.time()
+        self.enabled = PSUTIL_AVAILABLE
+    
+    def get_skip(self) -> int:
+        """Get current frame skip value"""
+        if not self.enabled:
+            return self.current_skip
+        
+        # Check CPU mỗi check_interval giây
+        now = time.time()
+        if now - self.last_check >= self.check_interval:
+            try:
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                
+                if cpu_percent > 80:
+                    # CPU cao → tăng skip
+                    self.current_skip = min(self.max_skip, self.current_skip + 1)
+                    logger.debug(f"CPU high ({cpu_percent:.1f}%) → skip={self.current_skip}")
+                elif cpu_percent < 50:
+                    # CPU thấp → giảm skip
+                    self.current_skip = max(self.min_skip, self.current_skip - 1)
+                    logger.debug(f"CPU low ({cpu_percent:.1f}%) → skip={self.current_skip}")
+            except Exception as e:
+                logger.warning(f"Error checking CPU: {e}")
+            
+            self.last_check = now
+        
+        return self.current_skip
+
+class RecognitionWorker:
+    """Background worker để xử lý recognition (non-blocking)"""
+    
+    def __init__(self, api_client, embedder, device_id, max_queue_size: int = 2):
+        self.api_client = api_client
+        self.embedder = embedder
+        self.device_id = device_id
+        self.queue = queue.Queue(maxsize=max_queue_size)
+        self.result_queue = queue.Queue()
+        self.running = False
+        self.thread = None
+        self.stats = {"processed": 0, "dropped": 0}
+    
+    def start(self):
+        """Start worker thread"""
+        if self.running:
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+        logger.info("Recognition worker started")
+    
+    def stop(self):
+        """Stop worker thread"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        logger.info("Recognition worker stopped")
+    
+    def add_frame(self, face_crop: np.ndarray, quality: float) -> bool:
+        """
+        Add frame để xử lý (non-blocking)
+        Returns: True nếu đã thêm vào queue, False nếu queue đầy
+        """
+        try:
+            self.queue.put_nowait((face_crop.copy(), quality))
+            return True
+        except queue.Full:
+            self.stats["dropped"] += 1
+            return False
+    
+    def get_result(self) -> Optional[Dict]:
+        """Get result (non-blocking)"""
+        try:
+            result = self.result_queue.get_nowait()
+            return result
+        except queue.Empty:
+            return None
+    
+    def _worker(self):
+        """Worker thread loop"""
+        while self.running:
+            try:
+                face_crop, quality = self.queue.get(timeout=0.1)
+                
+                # Compute embedding
+                emb = normalize_embedding(self.embedder(face_crop))
+                
+                # API call
+                resp = self.api_client.recognize(
+                    self.device_id, emb.tolist(),
+                    liveness=0.9, quality=quality
+                )
+                
+                # Put result với timestamp
+                self.result_queue.put_nowait({
+                    "response": resp,
+                    "timestamp": time.time()
+                })
+                
+                self.stats["processed"] += 1
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Recognition worker error: {e}", exc_info=True)
+                # Put error result
+                try:
+                    self.result_queue.put_nowait({
+                        "response": {"status": "error", "reason": str(e)},
+                        "timestamp": time.time()
+                    })
+                except:
+                    pass
 
 # ============= API calls với Retry Logic =============
 class APIClient:
@@ -242,11 +426,29 @@ def main():
     cascade_path = find_haarcascade()
     face_cascade = cv2.CascadeClassifier(cascade_path)
     embedder = None
+    recognition_worker = None
+    
     if mode_cfg == "real":
         from embedding_tflite import MobileFaceNetEmbedder
         tta_flip = cfg.get("recognition", {}).get("tta_flip", False)
+        
+        # Resolve model_path: nếu là đường dẫn tương đối, resolve từ project root
+        if model_path:
+            model_path = Path(model_path).expanduser()  # Expand ~
+            if not model_path.is_absolute():
+                project_root = get_project_root()
+                model_path = project_root / model_path
+            model_path = str(model_path.resolve())
+        
         embedder = MobileFaceNetEmbedder(model_path, use_tta=tta_flip)   # 192d
-        logger.info(f"Loaded MobileFaceNet embedder (TTA: {tta_flip})")
+        logger.info(f"Loaded MobileFaceNet embedder (TTA: {tta_flip}) from {model_path}")
+        
+        # PHASE 1 OPTIMIZATION: Initialize async recognition worker
+        use_async_recognition = cfg.get("recognition", {}).get("async_recognition", True)
+        if use_async_recognition:
+            recognition_worker = RecognitionWorker(api_client, embedder, device_id, max_queue_size=2)
+            recognition_worker.start()
+            logger.info("Async recognition worker enabled")
     
     # Initialize TTS Speaker
     tts_cfg = cfg.get("tts", {})
@@ -354,8 +556,19 @@ def main():
     last_color=(0,255,0)
     last_time=0.0
     
-    # Frame skip để giảm CPU cho Pi 3B+ (đọc từ config)
-    frame_skip = cfg.get("recognition", {}).get("frame_skip", 3)
+    # PHASE 1 OPTIMIZATION: Adaptive frame skip
+    base_frame_skip = cfg.get("recognition", {}).get("frame_skip", 3)
+    use_adaptive_skip = cfg.get("recognition", {}).get("adaptive_frame_skip", True) and PSUTIL_AVAILABLE
+    if use_adaptive_skip:
+        adaptive_skip = AdaptiveFrameSkip(
+            base_skip=base_frame_skip,
+            max_skip=cfg.get("recognition", {}).get("max_frame_skip", 5),
+            min_skip=cfg.get("recognition", {}).get("min_frame_skip", 1),
+            check_interval=cfg.get("recognition", {}).get("cpu_check_interval", 2.0)
+        )
+    else:
+        # Fixed frame skip
+        adaptive_skip = type('obj', (object,), {'get_skip': lambda: base_frame_skip, 'enabled': False})()
     frame_counter = 0
     
     # Multi-frame voting để tăng accuracy
@@ -364,11 +577,17 @@ def main():
     vote_threshold = cfg.get("recognition", {}).get("vote_threshold", 3)
     voting_buffer = VotingBuffer(window_size=vote_window, vote_threshold=vote_threshold) if use_voting else None
     
-    # Throttle recognition (đọc từ config)
-    throttle_recog = cfg.get("recognition", {}).get("throttle_recognition", 0.8)
+    # Throttle recognition (đọc từ config) - chỉ dùng khi không có async worker
+    throttle_recog = cfg.get("recognition", {}).get("throttle_recognition", 0.8) if not recognition_worker else 0.0
     
-    logger.info(f"Performance settings: frame_skip={frame_skip}, throttle={throttle_recog}s")
+    # PHASE 1 OPTIMIZATION: Memory buffers để reuse
+    gray_buffer = None  # Reuse gray buffer
+    
+    logger.info(f"Performance settings: adaptive_skip={adaptive_skip.enabled}, base_skip={base_frame_skip}, throttle={throttle_recog}s")
     logger.info(f"Accuracy settings: voting={use_voting}, vote_window={vote_window}, vote_threshold={vote_threshold}")
+    logger.info(f"Optimizations: async_recognition={recognition_worker is not None}, fast_quality=True")
+    if not PSUTIL_AVAILABLE:
+        logger.warning("psutil not available - adaptive frame skip disabled (install: pip install psutil)")
 
     try:
         while True:
@@ -379,8 +598,9 @@ def main():
                 rgb = picam2.capture_array()
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             
-            # Frame skip để giảm CPU
-            if frame_counter % frame_skip != 0:
+            # PHASE 1 OPTIMIZATION: Adaptive frame skip
+            current_skip = adaptive_skip.get_skip()
+            if frame_counter % current_skip != 0:
                 # Vẫn hiển thị nhưng không xử lý
                 cv2.putText(bgr, last_msg, (10, 50),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, last_color, 2, cv2.LINE_AA)
@@ -389,7 +609,11 @@ def main():
                     break
                 continue
             
-            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            # PHASE 1 OPTIMIZATION: Reuse gray buffer
+            if gray_buffer is None or gray_buffer.shape != bgr.shape[:2]:
+                gray_buffer = np.zeros(bgr.shape[:2], dtype=np.uint8)
+            cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY, dst=gray_buffer)
+            gray = gray_buffer
             # Tối ưu face detection cho Pi 3B+
             # scaleFactor=1.3 (tăng từ 1.2) = nhanh hơn nhưng có thể miss một số faces
             # minNeighbors=4 (giảm từ 5) = detect nhanh hơn
@@ -410,68 +634,122 @@ def main():
                 last_activity  = state["enroll_last_activity"]
 
             if cur_mode == "recognize":
+                # PHASE 1 OPTIMIZATION: Check results từ async worker
+                if recognition_worker:
+                    result = recognition_worker.get_result()
+                    if result:
+                        resp = result["response"]
+                        if resp.get("status") == "ok":
+                            res = resp.get("result", {}) or {}
+                            emp = res.get("emp_id")
+                            name = res.get("full_name")
+                            score = res.get("score")
+                            
+                            if emp and name and score is not None:
+                                if use_voting and voting_buffer:
+                                    voting_buffer.add(emp, score)
+                                    voted = voting_buffer.get_voted_result()
+                                    
+                                    if voted:
+                                        voted_emp, voted_score = voted
+                                        last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
+                                        last_color = (0, 200, 0)
+                                        tts.speak_welcome(name)
+                                    else:
+                                        last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
+                                        last_color = (0, 150, 150)
+                                else:
+                                    last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
+                                    last_color = (0, 200, 0)
+                                    tts.speak_welcome(name)
+                            else:
+                                last_msg = "OK but missing result"
+                                last_color = (0,150,150)
+                        else:
+                            if use_voting and voting_buffer:
+                                voting_buffer.add(None, 0.0)
+                            last_msg = f"REJECT: {resp.get('reason')}"
+                            last_color = (0,0,200)
+                
                 if target:
                     x,y,w,h = target
                     cv2.rectangle(bgr, (x,y), (x+w,y+h), (0,255,0), 2)
-                    face_crop = bgr[y:y+h, x:x+w].copy()
-                    quality = calc_quality(face_crop)
-                    if time.time()-last_time > throttle_recog:
-                        try:
-                            # Image enhancement nếu quality thấp (chỉ khi RẤT thấp để tránh lag)
+                    
+                    # PHASE 1 OPTIMIZATION: Use view instead of copy when possible
+                    face_crop = bgr[y:y+h, x:x+w]  # View first
+                    face_gray_roi = gray[y:y+h, x:x+w]  # Reuse gray
+                    
+                    # PHASE 1 OPTIMIZATION: Fast quality calculation từ gray
+                    quality = calc_quality_fast(face_gray_roi)
+                    
+                    # PHASE 1 OPTIMIZATION: Async recognition (non-blocking)
+                    if recognition_worker:
+                        # Add to worker queue (non-blocking)
+                        if quality >= cfg.get("recognition", {}).get("quality_min", 0.45):
+                            # Copy only when needed
+                            face_crop_copy = face_crop.copy()
+                            
+                            # Image enhancement nếu quality thấp
                             enhance_low_quality = cfg.get("recognition", {}).get("enhance_low_quality", True)
-                            if enhance_low_quality and quality < 0.5:  # Giảm từ 0.6 xuống 0.5
-                                face_crop = enhance_face_quality(face_crop)
+                            if enhance_low_quality and quality < 0.5:
+                                face_crop_copy = enhance_face_quality(face_crop_copy)
                             
-                            if mode_cfg == "fixed_test":
-                                # pad lên 192d để khớp server
-                                emb128 = np.array(make_embedding_fixed(), np.float32)
-                                emb = np.zeros(192, np.float32); emb[:128] = emb128
-                            else:
-                                emb = normalize_embedding(embedder(face_crop))
-                            
-                            # Sử dụng APIClient với retry logic
-                            resp = api_client.recognize(device_id, emb.tolist(),
-                                                       liveness=0.9, quality=float(quality))
-                            
-                            if resp.get("status") == "ok":
-                                res = resp.get("result", {}) or {}
-                                emp = res.get("emp_id")
-                                name = res.get("full_name")
-                                score = res.get("score")
+                            # Add to worker (non-blocking)
+                            recognition_worker.add_frame(face_crop_copy, quality)
+                    else:
+                        # Synchronous recognition (old way)
+                        if time.time()-last_time > throttle_recog:
+                            try:
+                                face_crop_copy = face_crop.copy()
                                 
-                                if emp and name and score is not None:
-                                    # Multi-frame voting để tăng accuracy
-                                    if use_voting and voting_buffer:
-                                        voting_buffer.add(emp, score)
-                                        voted = voting_buffer.get_voted_result()
-                                        
-                                        if voted:
-                                            voted_emp, voted_score = voted
-                                            last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
-                                            last_color = (0, 200, 0)
-                                            # TTS: Phát âm tên user
-                                            tts.speak_welcome(name)
-                                        else:
-                                            last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
-                                            last_color = (0, 150, 150)
-                                    else:
-                                        # Không dùng voting
-                                        last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
-                                        last_color = (0, 200, 0)
-                                        # TTS: Phát âm tên user
-                                        tts.speak_welcome(name)
+                                enhance_low_quality = cfg.get("recognition", {}).get("enhance_low_quality", True)
+                                if enhance_low_quality and quality < 0.5:
+                                    face_crop_copy = enhance_face_quality(face_crop_copy)
+                                
+                                if mode_cfg == "fixed_test":
+                                    emb128 = np.array(make_embedding_fixed(), np.float32)
+                                    emb = np.zeros(192, np.float32); emb[:128] = emb128
                                 else:
-                                    last_msg = "OK but missing result"
-                                    last_color = (0,150,150)
-                            else:
-                                if use_voting and voting_buffer:
-                                    voting_buffer.add(None, 0.0)
-                                last_msg = f"REJECT: {resp.get('reason')}"
-                                last_color = (0,0,200)
-                        except Exception as e:
-                            last_msg = f"ERR: {e}"
-                            last_color = (0,0,255)
-                        last_time = time.time()
+                                    emb = normalize_embedding(embedder(face_crop_copy))
+                                
+                                resp = api_client.recognize(device_id, emb.tolist(),
+                                                           liveness=0.9, quality=float(quality))
+                                
+                                if resp.get("status") == "ok":
+                                    res = resp.get("result", {}) or {}
+                                    emp = res.get("emp_id")
+                                    name = res.get("full_name")
+                                    score = res.get("score")
+                                    
+                                    if emp and name and score is not None:
+                                        if use_voting and voting_buffer:
+                                            voting_buffer.add(emp, score)
+                                            voted = voting_buffer.get_voted_result()
+                                            
+                                            if voted:
+                                                voted_emp, voted_score = voted
+                                                last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
+                                                last_color = (0, 200, 0)
+                                                tts.speak_welcome(name)
+                                            else:
+                                                last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
+                                                last_color = (0, 150, 150)
+                                        else:
+                                            last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
+                                            last_color = (0, 200, 0)
+                                            tts.speak_welcome(name)
+                                    else:
+                                        last_msg = "OK but missing result"
+                                        last_color = (0,150,150)
+                                else:
+                                    if use_voting and voting_buffer:
+                                        voting_buffer.add(None, 0.0)
+                                    last_msg = f"REJECT: {resp.get('reason')}"
+                                    last_color = (0,0,200)
+                            except Exception as e:
+                                last_msg = f"ERR: {e}"
+                                last_color = (0,0,255)
+                            last_time = time.time()
                 else:
                     if use_voting and voting_buffer:
                         voting_buffer.clear()
@@ -581,6 +859,9 @@ def main():
 
     finally:
         try:
+            # PHASE 1 OPTIMIZATION: Stop recognition worker
+            if recognition_worker:
+                recognition_worker.stop()
             if sensor:
                 sensor.cleanup()
             tts.stop()
