@@ -1,5 +1,8 @@
 import time, threading, json, random, logging
 import queue
+import struct
+import zlib
+import base64
 from pathlib import Path
 import cv2, numpy as np, requests
 from picamera2 import Picamera2
@@ -7,6 +10,130 @@ from collections import deque, Counter
 from typing import Optional, Dict, List, Tuple
 from tts_speaker import TTSSpeaker
 from sensor_controller import SensorController
+
+# ============= Recognition State Management =============
+class RecognitionState:
+    """Quản lý state của recognition workflow với sensor"""
+    
+    IDLE = "idle"
+    PERSON_DETECTED = "person_detected"
+    RECOGNIZING = "recognizing"
+    RECOGNIZED = "recognized"
+    RECOGNITION_FAILED = "recognition_failed"
+    PERSON_LEFT = "person_left"
+    COOLDOWN = "cooldown"  # Cooldown sau khi nhận diện thành công
+    
+    def __init__(self, max_retries: int = 3, timeout_sec: float = 15.0, cooldown_sec: float = 5.0):
+        self.current_state = self.IDLE
+        self.recognition_start_time = None
+        self.retry_count = 0
+        self.max_retries = max_retries
+        self.timeout_sec = timeout_sec
+        self.cooldown_sec = cooldown_sec
+        self.cooldown_start_time = None
+        self.last_recognized_name = None
+        self.has_spoken = False  # Flag để track đã nói TTS chưa
+        self._lock = threading.Lock()
+    
+    def set_state(self, new_state: str):
+        """Set state (thread-safe)"""
+        with self._lock:
+            self.current_state = new_state
+            if new_state == self.RECOGNIZING:
+                self.recognition_start_time = time.time()
+            elif new_state == self.RECOGNIZED:
+                self.retry_count = 0
+                # Bắt đầu cooldown ngay khi nhận diện thành công
+                self.cooldown_start_time = time.time()
+                # Tự động chuyển sang COOLDOWN state
+                self.current_state = self.COOLDOWN
+                # Reset flag để cho phép nói TTS (chỉ 1 lần)
+                self.has_spoken = False
+            elif new_state == self.RECOGNITION_FAILED:
+                self.retry_count += 1
+            elif new_state == self.COOLDOWN:
+                if self.cooldown_start_time is None:
+                    self.cooldown_start_time = time.time()
+    
+    def get_state(self) -> str:
+        """Get current state (thread-safe)"""
+        with self._lock:
+            return self.current_state
+    
+    def should_retry(self) -> bool:
+        """Check if should retry recognition"""
+        with self._lock:
+            return self.retry_count < self.max_retries
+    
+    def is_timeout(self) -> bool:
+        """Check if recognition timeout"""
+        with self._lock:
+            if self.recognition_start_time is None:
+                return False
+            return (time.time() - self.recognition_start_time) > self.timeout_sec
+    
+    def is_in_cooldown(self) -> bool:
+        """
+        Check if đang trong cooldown period
+        
+        Returns:
+            True nếu đang trong cooldown, False nếu không
+            Tự động chuyển về IDLE khi cooldown hết
+        """
+        with self._lock:
+            if self.current_state == self.COOLDOWN:
+                if self.cooldown_start_time is None:
+                    # Không có start time → không trong cooldown
+                    self.current_state = self.IDLE
+                    return False
+                
+                elapsed = time.time() - self.cooldown_start_time
+                if elapsed >= self.cooldown_sec:
+                    # Cooldown hết → chuyển về IDLE và quay lại hoạt động bình thường
+                    self.current_state = self.IDLE
+                    self.cooldown_start_time = None
+                    self.last_recognized_name = None  # Clear tên đã nhận diện
+                    self.has_spoken = False  # Reset flag TTS
+                    logger.info("Cooldown finished - returning to normal operation")
+                    return False
+                return True
+            return False
+    
+    def get_cooldown_remaining(self) -> float:
+        """
+        Get thời gian còn lại của cooldown (giây)
+        
+        Returns:
+            Thời gian còn lại (giây), hoặc 0 nếu không trong cooldown
+        """
+        with self._lock:
+            if self.current_state == self.COOLDOWN and self.cooldown_start_time is not None:
+                elapsed = time.time() - self.cooldown_start_time
+                remaining = self.cooldown_sec - elapsed
+                return max(0.0, remaining)
+            return 0.0
+    
+    def reset(self):
+        """Reset state"""
+        with self._lock:
+            self.current_state = self.IDLE
+            self.recognition_start_time = None
+            self.retry_count = 0
+            self.cooldown_start_time = None
+            self.last_recognized_name = None
+            self.has_spoken = False
+    
+    def mark_spoken(self):
+        """Đánh dấu đã nói TTS (chỉ gọi 1 lần)"""
+        with self._lock:
+            self.has_spoken = True
+    
+    def should_speak(self) -> bool:
+        """Kiểm tra có nên nói TTS không (chưa nói và đang trong RECOGNIZED/COOLDOWN)"""
+        with self._lock:
+            if self.has_spoken:
+                return False
+            return self.current_state == self.RECOGNIZED or self.current_state == self.COOLDOWN
 
 # Try import psutil for adaptive frame skip
 try:
@@ -181,6 +308,125 @@ class VotingBuffer:
 
 # ============= Phase 1 Optimizations =============
 
+# ============= Phase 2 Optimizations =============
+
+class FaceTracker:
+    """Track face position để giảm detection area (ROI Tracking)"""
+    
+    def __init__(self, decay: float = 0.9, min_confidence: float = 0.3, expand: float = 1.5):
+        """
+        Args:
+            decay: Confidence decay rate khi không detect được face
+            min_confidence: Confidence tối thiểu để dùng ROI
+            expand: Hệ số mở rộng ROI (1.5 = 150% kích thước face)
+        """
+        self.last_bbox = None  # (x, y, w, h)
+        self.confidence = 0.0
+        self.decay = decay
+        self.min_confidence = min_confidence
+        self.expand = expand
+        self.miss_count = 0  # Đếm số lần miss liên tiếp
+    
+    def update(self, bbox: Optional[Tuple[int, int, int, int]]):
+        """Update tracked bbox"""
+        if bbox:
+            x, y, w, h = bbox
+            self.last_bbox = (x, y, w, h)
+            self.confidence = 1.0
+            self.miss_count = 0
+        else:
+            # Không detect được → giảm confidence
+            self.confidence *= self.decay
+            self.miss_count += 1
+    
+    def get_roi(self, frame_shape: Tuple[int, int]) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Get ROI để detect (chỉ detect trong vùng này)
+        
+        Args:
+            frame_shape: (height, width) của frame
+            
+        Returns:
+            (x, y, w, h) ROI hoặc None nếu không có track
+        """
+        if self.last_bbox is None:
+            return None
+        
+        if self.confidence < self.min_confidence:
+            return None
+        
+        # Nếu miss quá nhiều lần → reset
+        if self.miss_count > 10:
+            self.last_bbox = None
+            self.confidence = 0.0
+            return None
+        
+        x, y, w, h = self.last_bbox
+        frame_h, frame_w = frame_shape
+        
+        # Expand ROI từ center
+        cx, cy = x + w // 2, y + h // 2
+        new_w = int(w * self.expand)
+        new_h = int(h * self.expand)
+        
+        # Clamp to frame bounds
+        x1 = max(0, cx - new_w // 2)
+        y1 = max(0, cy - new_h // 2)
+        x2 = min(frame_w, cx + new_w // 2)
+        y2 = min(frame_h, cy + new_h // 2)
+        
+        return (x1, y1, x2 - x1, y2 - y1)
+    
+    def reset(self):
+        """Reset tracker"""
+        self.last_bbox = None
+        self.confidence = 0.0
+        self.miss_count = 0
+
+# PHASE 2 OPTIMIZATION: Network Compression
+def compress_embedding(emb: np.ndarray) -> bytes:
+    """
+    Compress embedding với quantization + zlib
+    
+    Args:
+        emb: Embedding vector (192d, float32, normalized)
+        
+    Returns:
+        Compressed bytes
+    """
+    # Quantize từ float32 -> int16 (giảm 50% size)
+    # Scale: [-1, 1] -> [-32767, 32767]
+    emb_int16 = (emb * 32767).astype(np.int16)
+    
+    # Pack binary
+    packed = struct.pack(f'{len(emb_int16)}h', *emb_int16)
+    
+    # Compress với zlib (level=1 nhanh, level=6 cân bằng)
+    compressed = zlib.compress(packed, level=1)
+    
+    return compressed
+
+def decompress_embedding(data: bytes) -> np.ndarray:
+    """
+    Decompress embedding
+    
+    Args:
+        data: Compressed bytes
+        
+    Returns:
+        Embedding vector (192d, float32)
+    """
+    # Decompress
+    unpacked = zlib.decompress(data)
+    
+    # Unpack binary
+    emb_int16 = struct.unpack(f'{len(unpacked)//2}h', unpacked)
+    
+    # Convert back to float32
+    emb = np.array(emb_int16, dtype=np.float32) / 32767.0
+    
+    return emb
+
 class AdaptiveFrameSkip:
     """Tự động điều chỉnh frame skip dựa trên CPU load"""
     
@@ -269,6 +515,23 @@ class RecognitionWorker:
         except queue.Empty:
             return None
     
+    def clear_queues(self):
+        """Clear tất cả queues (dùng khi vào cooldown)"""
+        # Clear input queue
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                self.stats["dropped"] += 1
+            except queue.Empty:
+                break
+        
+        # Clear result queue
+        while not self.result_queue.empty():
+            try:
+                self.result_queue.get_nowait()
+            except queue.Empty:
+                break
+    
     def _worker(self):
         """Worker thread loop"""
         while self.running:
@@ -309,10 +572,11 @@ class RecognitionWorker:
 class APIClient:
     """API client với retry logic và timeout handling"""
     
-    def __init__(self, base_url: str, timeout: int = 3, max_retries: int = 3):
+    def __init__(self, base_url: str, timeout: int = 3, max_retries: int = 3, use_compression: bool = True):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self.use_compression = use_compression  # PHASE 2: Network compression
         self.session = requests.Session()
         # Connection pooling để tăng tốc
         adapter = requests.adapters.HTTPAdapter(
@@ -348,13 +612,30 @@ class APIClient:
     
     def recognize(self, device_id: str, emb: List[float], liveness: float, quality: float) -> Dict:
         """POST /v1/recognize"""
-        payload = {
-            "device_id": device_id,
-            "embedding": list(map(float, emb)),
-            "liveness": float(liveness),
-            "quality": float(quality),
-            "options": {"save_event_face": False, "mode": "auto"},
-        }
+        # PHASE 2 OPTIMIZATION: Network compression
+        if self.use_compression:
+            emb_array = np.array(emb, dtype=np.float32)
+            compressed = compress_embedding(emb_array)
+            # Encode base64 để gửi qua JSON
+            compressed_b64 = base64.b64encode(compressed).decode('ascii')
+            
+            payload = {
+                "device_id": device_id,
+                "embedding_compressed": compressed_b64,
+                "liveness": float(liveness),
+                "quality": float(quality),
+                "options": {"save_event_face": False, "mode": "auto"},
+            }
+        else:
+            # Fallback: uncompressed
+            payload = {
+                "device_id": device_id,
+                "embedding": list(map(float, emb)),
+                "liveness": float(liveness),
+                "quality": float(quality),
+                "options": {"save_event_face": False, "mode": "auto"},
+            }
+        
         response = self._retry_request("POST", f"{self.base_url}/v1/recognize", json=payload)
         return response.json()
 
@@ -422,7 +703,8 @@ def main():
     enroll_timeout = float(jobs_cfg.get("enroll_timeout_sec", 30.0))  # timeout không hoạt động
 
     # Initialize components
-    api_client = APIClient(base_url, timeout)
+    use_compression = cfg.get("recognition", {}).get("network_compression", True)
+    api_client = APIClient(base_url, timeout, use_compression=use_compression)
     cascade_path = find_haarcascade()
     face_cascade = cv2.CascadeClassifier(cascade_path)
     embedder = None
@@ -459,6 +741,13 @@ def main():
     tts = TTSSpeaker(enabled=tts_enabled, volume=tts_volume, speed=tts_speed, cooldown=tts_cooldown)
     logger.info(f"TTS Speaker initialized (enabled: {tts_enabled})")
     
+    # Initialize Recognition State (tích hợp sensor + recognition)
+    recog_cfg = cfg.get("recognition", {})
+    max_retries = recog_cfg.get("max_retries", 3)
+    recog_timeout = recog_cfg.get("recognition_timeout", 15.0)
+    cooldown_sec = recog_cfg.get("cooldown_after_success", 5.0)  # Cooldown sau khi nhận diện thành công
+    recognition_state = RecognitionState(max_retries=max_retries, timeout_sec=recog_timeout, cooldown_sec=cooldown_sec)
+    
     # Initialize Sensor Controller (HC-SR04 + LED)
     sensor_cfg = cfg.get("sensor", {})
     sensor_enabled = sensor_cfg.get("enabled", False)
@@ -468,6 +757,7 @@ def main():
     sensor_trigger_distance = sensor_cfg.get("trigger_distance", 100.0)
     sensor_led_duration = sensor_cfg.get("led_on_duration", 10.0)
     sensor_check_interval = sensor_cfg.get("check_interval", 0.2)
+    turn_off_on_success = sensor_cfg.get("turn_off_on_success", True)
     
     sensor = None
     if sensor_enabled:
@@ -480,13 +770,26 @@ def main():
             check_interval=sensor_check_interval
         )
         
-        # Callbacks khi phát hiện người
+        # Callbacks tích hợp với recognition workflow
         def on_person_detected(distance):
+            # Kiểm tra cooldown: Nếu đang trong cooldown → không làm gì
+            if recognition_state.is_in_cooldown():
+                logger.info(f"Person detected but in cooldown - ignoring")
+                return
+            
             logger.info(f"Person detected at {distance}cm - LED ON")
+            recognition_state.set_state(RecognitionState.PERSON_DETECTED)
+            # Thông báo ngắn gọn
             tts.speak_custom("Xin chào")
         
         def on_person_left():
             logger.info("Person left - LED OFF")
+            current_state = recognition_state.get_state()
+            if current_state == RecognitionState.RECOGNIZED:
+                # Đã nhận diện thành công → cảm ơn
+                tts.speak_custom("Cảm ơn")
+            recognition_state.set_state(RecognitionState.PERSON_LEFT)
+            recognition_state.reset()
         
         sensor.set_on_person_detected(on_person_detected)
         sensor.set_on_person_left(on_person_left)
@@ -538,6 +841,9 @@ def main():
                         state["samples"] = []
                         state["last_cap"] = 0.0
                         state["enroll_last_activity"] = time.time()
+                    # PHASE 2: Reset tracker khi chuyển sang enroll mode
+                    if face_tracker:
+                        face_tracker.reset()
                     print(f"[Enroll] new job -> id={job['id']} emp_id={job['emp_id']}")
                     api_job_start(base_url, job["id"], timeout=3)
                     interval = poll_min
@@ -583,9 +889,20 @@ def main():
     # PHASE 1 OPTIMIZATION: Memory buffers để reuse
     gray_buffer = None  # Reuse gray buffer
     
+    # PHASE 2 OPTIMIZATION: ROI Tracking
+    use_roi_tracking = cfg.get("recognition", {}).get("roi_tracking", True)
+    face_tracker = None
+    if use_roi_tracking:
+        face_tracker = FaceTracker(
+            decay=cfg.get("recognition", {}).get("roi_decay", 0.9),
+            min_confidence=cfg.get("recognition", {}).get("roi_min_confidence", 0.3),
+            expand=cfg.get("recognition", {}).get("roi_expand", 1.5)
+        )
+        logger.info("ROI Tracking enabled")
+    
     logger.info(f"Performance settings: adaptive_skip={adaptive_skip.enabled}, base_skip={base_frame_skip}, throttle={throttle_recog}s")
     logger.info(f"Accuracy settings: voting={use_voting}, vote_window={vote_window}, vote_threshold={vote_threshold}")
-    logger.info(f"Optimizations: async_recognition={recognition_worker is not None}, fast_quality=True")
+    logger.info(f"Optimizations: async_recognition={recognition_worker is not None}, fast_quality=True, roi_tracking={use_roi_tracking}")
     if not PSUTIL_AVAILABLE:
         logger.warning("psutil not available - adaptive frame skip disabled (install: pip install psutil)")
 
@@ -609,21 +926,65 @@ def main():
                     break
                 continue
             
+            # Kiểm tra cooldown: Skip face detection và recognition nếu đang trong cooldown
+            if sensor_enabled:
+                # Lưu state trước khi check (vì is_in_cooldown() có thể thay đổi state)
+                prev_state = recognition_state.get_state()
+                is_cooldown = recognition_state.is_in_cooldown()
+                current_state = recognition_state.get_state()
+                
+                if is_cooldown:
+                    # Đang trong cooldown → không detect face, không nhận diện
+                    # LED đã tắt từ khi nhận diện thành công
+                    remaining = recognition_state.get_cooldown_remaining()
+                    cv2.putText(bgr, f"Cooldown... {remaining:.1f}s", (10, 50),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+                    cv2.imshow(window, bgr)
+                    if cv2.waitKey(1) & 0xFF == 27:
+                        break
+                    continue
+                elif prev_state == RecognitionState.COOLDOWN and current_state == RecognitionState.IDLE:
+                    # Cooldown vừa hết (chuyển từ COOLDOWN → IDLE) → reset message và voting buffer
+                    last_msg = "Waiting face..."
+                    last_color = (0, 255, 0)
+                    if use_voting and voting_buffer:
+                        voting_buffer.clear()
+                    logger.info("Cooldown finished - cleared old results and reset UI")
+            
             # PHASE 1 OPTIMIZATION: Reuse gray buffer
             if gray_buffer is None or gray_buffer.shape != bgr.shape[:2]:
                 gray_buffer = np.zeros(bgr.shape[:2], dtype=np.uint8)
             cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY, dst=gray_buffer)
             gray = gray_buffer
-            # Tối ưu face detection cho Pi 3B+
-            # scaleFactor=1.3 (tăng từ 1.2) = nhanh hơn nhưng có thể miss một số faces
-            # minNeighbors=4 (giảm từ 5) = detect nhanh hơn
-            # minSize giảm xuống (60,60) để detect xa hơn
-            faces = face_cascade.detectMultiScale(gray, 1.3, 4, minSize=(60,60))
+            
+            # PHASE 2 OPTIMIZATION: ROI Tracking - chỉ detect trong ROI
+            faces = []
+            roi = None
+            if face_tracker:
+                roi = face_tracker.get_roi(gray.shape)
+            
+            if roi:
+                # Chỉ detect trong ROI (nhanh hơn 3-5x)
+                x_roi, y_roi, w_roi, h_roi = roi
+                roi_gray = gray[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi]
+                faces_roi = face_cascade.detectMultiScale(roi_gray, 1.3, 4, minSize=(60,60))
+                # Offset về tọa độ gốc
+                faces = [(x+x_roi, y+y_roi, w, h) for (x,y,w,h) in faces_roi]
+                # Vẽ ROI rectangle để debug (optional)
+                if cfg.get("recognition", {}).get("show_roi", False):
+                    cv2.rectangle(bgr, (x_roi, y_roi), (x_roi+w_roi, y_roi+h_roi), (255, 0, 255), 1)
+            else:
+                # Full frame detection (chỉ khi mất track hoặc lần đầu)
+                faces = face_cascade.detectMultiScale(gray, 1.3, 4, minSize=(60,60))
 
             target=None; area_max=0
             for (x,y,w,h) in faces:
                 if w*h > area_max:
                     area_max=w*h; target=(x,y,w,h)
+            
+            # PHASE 2 OPTIMIZATION: Update tracker
+            if face_tracker:
+                face_tracker.update(target)
 
             with state_lock:
                 cur_mode = state["mode"]
@@ -634,42 +995,130 @@ def main():
                 last_activity  = state["enroll_last_activity"]
 
             if cur_mode == "recognize":
+                # Kiểm tra timeout nếu đang nhận diện
+                if sensor_enabled and recognition_state.get_state() == RecognitionState.RECOGNIZING:
+                    if recognition_state.is_timeout():
+                        recognition_state.set_state(RecognitionState.RECOGNITION_FAILED)
+                        if sensor and turn_off_on_success:
+                            sensor.turn_led_off_immediate()
+                        tts.speak_custom("Hết thời gian")
+                        recognition_state.reset()
+                
                 # PHASE 1 OPTIMIZATION: Check results từ async worker
+                # QUAN TRỌNG: Chỉ xử lý results khi KHÔNG trong cooldown
                 if recognition_worker:
-                    result = recognition_worker.get_result()
-                    if result:
-                        resp = result["response"]
-                        if resp.get("status") == "ok":
-                            res = resp.get("result", {}) or {}
-                            emp = res.get("emp_id")
-                            name = res.get("full_name")
-                            score = res.get("score")
+                    # Kiểm tra cooldown TRƯỚC: Nếu đang trong cooldown → ignore tất cả results
+                    if sensor_enabled and recognition_state.is_in_cooldown():
+                        # Clear queue liên tục để tránh xử lý kết quả cũ
+                        while True:
+                            try:
+                                recognition_worker.get_result()  # Pop result nếu có
+                            except:
+                                break
+                    else:
+                        # Chỉ xử lý result khi KHÔNG trong cooldown
+                        result = recognition_worker.get_result()
+                        if result:
+                            # Double check: Nếu đã vào cooldown trong lúc xử lý → skip
+                            if sensor_enabled and recognition_state.is_in_cooldown():
+                                continue
                             
-                            if emp and name and score is not None:
-                                if use_voting and voting_buffer:
-                                    voting_buffer.add(emp, score)
-                                    voted = voting_buffer.get_voted_result()
-                                    
-                                    if voted:
-                                        voted_emp, voted_score = voted
-                                        last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
-                                        last_color = (0, 200, 0)
-                                        tts.speak_welcome(name)
+                            resp = result["response"]
+                            if resp.get("status") == "ok":
+                                res = resp.get("result", {}) or {}
+                                emp = res.get("emp_id")
+                                name = res.get("full_name")
+                                score = res.get("score")
+                                
+                                if emp and name and score is not None:
+                                    if use_voting and voting_buffer:
+                                        voting_buffer.add(emp, score)
+                                        voted = voting_buffer.get_voted_result()
+                                        
+                                        if voted:
+                                            voted_emp, voted_score = voted
+                                            last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
+                                            last_color = (0, 200, 0)
+                                            
+                                            # QUAN TRỌNG: Kiểm tra lại cooldown trước khi xử lý
+                                            # (tránh xử lý nhiều results cùng lúc)
+                                            if sensor_enabled and recognition_state.is_in_cooldown():
+                                                # Đã vào cooldown từ result trước → skip result này
+                                                continue
+                                            
+                                            # Tích hợp sensor: Tắt LED và thông báo
+                                            recognition_state.set_state(RecognitionState.RECOGNIZED)
+                                            recognition_state.last_recognized_name = name
+                                            # QUAN TRỌNG: Luôn tắt LED khi nhận diện thành công (không phụ thuộc config)
+                                            if sensor_enabled and sensor:
+                                                sensor.turn_led_off_immediate()
+                                                logger.info("LED turned off after successful recognition")
+                                            
+                                            # Clear async worker queues NGAY LẬP TỨC để tránh xử lý results cũ
+                                            if recognition_worker:
+                                                recognition_worker.clear_queues()
+                                            
+                                            # Thông báo ngắn gọn (chỉ 1 lần) - kiểm tra flag
+                                            if recognition_state.should_speak():
+                                                tts.speak_welcome(name)
+                                                recognition_state.mark_spoken()
+                                            # Cooldown đã được bắt đầu tự động trong set_state(RECOGNIZED)
+                                            logger.info(f"Recognition successful - entering {cooldown_sec}s cooldown")
+                                            
+                                            # QUAN TRỌNG: Đã nhận diện thành công → skip phần còn lại của frame
+                                            # Không cần break vì đã vào cooldown, các checks sau sẽ skip
+                                            pass
+                                        else:
+                                            last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
+                                            last_color = (0, 150, 150)
                                     else:
-                                        last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
-                                        last_color = (0, 150, 150)
+                                        last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
+                                        last_color = (0, 200, 0)
+                                        
+                                        # QUAN TRỌNG: Kiểm tra lại cooldown trước khi xử lý
+                                        if sensor_enabled and recognition_state.is_in_cooldown():
+                                            # Đã vào cooldown từ result trước → skip
+                                            pass
+                                        else:
+                                            # Tích hợp sensor: Tắt LED và thông báo
+                                            recognition_state.set_state(RecognitionState.RECOGNIZED)
+                                            recognition_state.last_recognized_name = name
+                                            # QUAN TRỌNG: Luôn tắt LED khi nhận diện thành công (không phụ thuộc config)
+                                            if sensor_enabled and sensor:
+                                                sensor.turn_led_off_immediate()
+                                                logger.info("LED turned off after successful recognition")
+                                            
+                                            # Clear async worker queues NGAY LẬP TỨC để tránh xử lý results cũ
+                                            if recognition_worker:
+                                                recognition_worker.clear_queues()
+                                            
+                                            # Thông báo ngắn gọn (chỉ 1 lần) - kiểm tra flag
+                                            if recognition_state.should_speak():
+                                                tts.speak_welcome(name)
+                                                recognition_state.mark_spoken()
+                                            # Cooldown đã được bắt đầu tự động trong set_state(RECOGNIZED)
+                                            logger.info(f"Recognition successful - entering {cooldown_sec}s cooldown")
                                 else:
-                                    last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
-                                    last_color = (0, 200, 0)
-                                    tts.speak_welcome(name)
+                                    last_msg = "OK but missing result"
+                                    last_color = (0,150,150)
                             else:
-                                last_msg = "OK but missing result"
-                                last_color = (0,150,150)
-                        else:
-                            if use_voting and voting_buffer:
-                                voting_buffer.add(None, 0.0)
-                            last_msg = f"REJECT: {resp.get('reason')}"
-                            last_color = (0,0,200)
+                                if use_voting and voting_buffer:
+                                    voting_buffer.add(None, 0.0)
+                                last_msg = f"REJECT: {resp.get('reason')}"
+                                last_color = (0,0,200)
+                                
+                                # Tích hợp sensor: Thông báo thất bại
+                                if sensor_enabled:
+                                    recognition_state.set_state(RecognitionState.RECOGNITION_FAILED)
+                                    if recognition_state.should_retry():
+                                        # Thông báo ngắn gọn
+                                        tts.speak_custom("Không nhận diện được")
+                                    else:
+                                        # Hết số lần thử → tắt LED
+                                        if sensor and turn_off_on_success:
+                                            sensor.turn_led_off_immediate()
+                                        tts.speak_custom("Hết thời gian")
+                                        recognition_state.reset()
                 
                 if target:
                     x,y,w,h = target
@@ -682,8 +1131,24 @@ def main():
                     # PHASE 1 OPTIMIZATION: Fast quality calculation từ gray
                     quality = calc_quality_fast(face_gray_roi)
                     
+                    # QUAN TRỌNG: Kiểm tra cooldown TRƯỚC khi xử lý face
+                    # Nếu đang trong cooldown → skip toàn bộ phần recognition
+                    if sensor_enabled and recognition_state.is_in_cooldown():
+                        # Đang trong cooldown → không nhận diện
+                        continue
+                    
+                    # Tích hợp sensor: Set state RECOGNIZING khi bắt đầu nhận diện
+                    if sensor_enabled:
+                        current_state = recognition_state.get_state()
+                        if current_state == RecognitionState.PERSON_DETECTED or current_state == RecognitionState.RECOGNITION_FAILED:
+                            recognition_state.set_state(RecognitionState.RECOGNIZING)
+                    
                     # PHASE 1 OPTIMIZATION: Async recognition (non-blocking)
                     if recognition_worker:
+                        # Kiểm tra cooldown trước khi add frame vào queue
+                        if sensor_enabled and recognition_state.is_in_cooldown():
+                            continue
+                        
                         # Add to worker queue (non-blocking)
                         if quality >= cfg.get("recognition", {}).get("quality_min", 0.45):
                             # Copy only when needed
@@ -697,59 +1162,123 @@ def main():
                             # Add to worker (non-blocking)
                             recognition_worker.add_frame(face_crop_copy, quality)
                     else:
-                        # Synchronous recognition (old way)
-                        if time.time()-last_time > throttle_recog:
-                            try:
-                                face_crop_copy = face_crop.copy()
-                                
-                                enhance_low_quality = cfg.get("recognition", {}).get("enhance_low_quality", True)
-                                if enhance_low_quality and quality < 0.5:
-                                    face_crop_copy = enhance_face_quality(face_crop_copy)
-                                
-                                if mode_cfg == "fixed_test":
-                                    emb128 = np.array(make_embedding_fixed(), np.float32)
-                                    emb = np.zeros(192, np.float32); emb[:128] = emb128
-                                else:
-                                    emb = normalize_embedding(embedder(face_crop_copy))
-                                
-                                resp = api_client.recognize(device_id, emb.tolist(),
-                                                           liveness=0.9, quality=float(quality))
-                                
-                                if resp.get("status") == "ok":
-                                    res = resp.get("result", {}) or {}
-                                    emp = res.get("emp_id")
-                                    name = res.get("full_name")
-                                    score = res.get("score")
+                        # Synchronous recognition (fallback)
+                        # Kiểm tra cooldown trước khi nhận diện
+                        if sensor_enabled and recognition_state.is_in_cooldown():
+                            continue
+                        
+                        if quality >= cfg.get("recognition", {}).get("quality_min", 0.45):
+                            if time.time() - last_time > throttle_recog:
+                                try:
+                                    # Image enhancement nếu quality thấp
+                                    enhance_low_quality = cfg.get("recognition", {}).get("enhance_low_quality", True)
+                                    if enhance_low_quality and quality < 0.5:
+                                        face_crop = enhance_face_quality(face_crop)
                                     
-                                    if emp and name and score is not None:
-                                        if use_voting and voting_buffer:
-                                            voting_buffer.add(emp, score)
-                                            voted = voting_buffer.get_voted_result()
-                                            
-                                            if voted:
-                                                voted_emp, voted_score = voted
-                                                last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
-                                                last_color = (0, 200, 0)
-                                                tts.speak_welcome(name)
-                                            else:
-                                                last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
-                                                last_color = (0, 150, 150)
-                                        else:
-                                            last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
-                                            last_color = (0, 200, 0)
-                                            tts.speak_welcome(name)
+                                    # Handle fixed_test mode
+                                    if mode_cfg == "fixed_test":
+                                        emb128 = np.array(make_embedding_fixed(), np.float32)
+                                        emb = np.zeros(192, np.float32)
+                                        emb[:128] = emb128
                                     else:
-                                        last_msg = "OK but missing result"
-                                        last_color = (0,150,150)
-                                else:
-                                    if use_voting and voting_buffer:
-                                        voting_buffer.add(None, 0.0)
-                                    last_msg = f"REJECT: {resp.get('reason')}"
-                                    last_color = (0,0,200)
-                            except Exception as e:
-                                last_msg = f"ERR: {e}"
-                                last_color = (0,0,255)
-                            last_time = time.time()
+                                        emb = normalize_embedding(embedder(face_crop))
+                                    
+                                    resp = api_client.recognize(device_id, emb.tolist(), liveness=0.9, quality=quality)
+                                    last_time = time.time()
+                                    
+                                    if resp.get("status") == "ok":
+                                        res = resp.get("result", {}) or {}
+                                        emp = res.get("emp_id")
+                                        name = res.get("full_name")
+                                        score = res.get("score")
+                                        
+                                        if emp and name and score is not None:
+                                            if use_voting and voting_buffer:
+                                                voting_buffer.add(emp, score)
+                                                voted = voting_buffer.get_voted_result()
+                                                
+                                                if voted:
+                                                    voted_emp, voted_score = voted
+                                                    last_msg = f"✓ {voted_emp} | {name} | {voted_score:.2f}"
+                                                    last_color = (0, 200, 0)
+                                                    
+                                                    # QUAN TRỌNG: Kiểm tra lại cooldown trước khi xử lý
+                                                    if sensor_enabled and recognition_state.is_in_cooldown():
+                                                        continue
+                                                    
+                                                    # Tích hợp sensor
+                                                    recognition_state.set_state(RecognitionState.RECOGNIZED)
+                                                    recognition_state.last_recognized_name = name
+                                                    # QUAN TRỌNG: Luôn tắt LED khi nhận diện thành công (không phụ thuộc config)
+                                                    if sensor_enabled and sensor:
+                                                        sensor.turn_led_off_immediate()
+                                                        logger.info("LED turned off after successful recognition")
+                                                    
+                                                    # Clear async worker queues NGAY LẬP TỨC
+                                                    if recognition_worker:
+                                                        recognition_worker.clear_queues()
+                                                    
+                                                    # Thông báo ngắn gọn (chỉ 1 lần) - kiểm tra flag
+                                                    if recognition_state.should_speak():
+                                                        tts.speak_welcome(name)
+                                                        recognition_state.mark_spoken()
+                                                    # Cooldown đã được bắt đầu tự động trong set_state(RECOGNIZED)
+                                                    logger.info(f"Recognition successful - entering {cooldown_sec}s cooldown")
+                                                    
+                                                    # Break để không xử lý thêm
+                                                    break
+                                                else:
+                                                    last_msg = f"Verifying... {emp} ({len(voting_buffer.buffer)}/{vote_threshold})"
+                                                    last_color = (0, 150, 150)
+                                            else:
+                                                last_msg = f"ACCEPTED: {emp} | {name} | score={score:.2f}"
+                                                last_color = (0, 200, 0)
+                                                
+                                                # QUAN TRỌNG: Kiểm tra lại cooldown trước khi xử lý
+                                                if sensor_enabled and recognition_state.is_in_cooldown():
+                                                    continue
+                                                
+                                                # Tích hợp sensor
+                                                recognition_state.set_state(RecognitionState.RECOGNIZED)
+                                                recognition_state.last_recognized_name = name
+                                                # QUAN TRỌNG: Luôn tắt LED khi nhận diện thành công (không phụ thuộc config)
+                                                if sensor_enabled and sensor:
+                                                    sensor.turn_led_off_immediate()
+                                                    logger.info("LED turned off after successful recognition")
+                                                
+                                                # Clear async worker queues NGAY LẬP TỨC
+                                                if recognition_worker:
+                                                    recognition_worker.clear_queues()
+                                                
+                                                # Thông báo ngắn gọn (chỉ 1 lần) - kiểm tra flag
+                                                if recognition_state.should_speak():
+                                                    tts.speak_welcome(name)
+                                                    recognition_state.mark_spoken()
+                                                # Cooldown đã được bắt đầu tự động trong set_state(RECOGNIZED)
+                                                logger.info(f"Recognition successful - entering {cooldown_sec}s cooldown")
+                                                
+                                                # Break để không xử lý thêm
+                                                break
+                                    else:
+                                        if use_voting and voting_buffer:
+                                            voting_buffer.add(None, 0.0)
+                                        last_msg = f"REJECT: {resp.get('reason')}"
+                                        last_color = (0,0,200)
+                                        
+                                        # Tích hợp sensor
+                                        if sensor_enabled:
+                                            recognition_state.set_state(RecognitionState.RECOGNITION_FAILED)
+                                            if recognition_state.should_retry():
+                                                tts.speak_custom("Không nhận diện được")
+                                            else:
+                                                if sensor and turn_off_on_success:
+                                                    sensor.turn_led_off_immediate()
+                                                tts.speak_custom("Hết thời gian")
+                                                recognition_state.reset()
+                                except Exception as e:
+                                    logger.error(f"Recognition error: {e}")
+                                    last_msg = f"ERROR: {str(e)[:30]}"
+                                    last_color = (0,0,255)
                 else:
                     if use_voting and voting_buffer:
                         voting_buffer.clear()
@@ -776,6 +1305,9 @@ def main():
                         state["samples"] = []
                         state["last_cap"] = 0.0
                         state["enroll_last_activity"] = 0.0
+                    # PHASE 2: Reset tracker khi quay lại recognize mode
+                    if face_tracker:
+                        face_tracker.reset()
 
                 else:
                     # 2) Thu mẫu bình thường
@@ -832,6 +1364,9 @@ def main():
                             with state_lock:
                                 state["mode"]="recognize"; state["job"]=None; state["samples"]=[]; state["last_cap"]=0.0
                                 state["enroll_last_activity"] = 0.0
+                            # PHASE 2: Reset tracker khi enroll xong
+                            if face_tracker:
+                                face_tracker.reset()
                         else:
                             with state_lock:
                                 state["samples"]=samples

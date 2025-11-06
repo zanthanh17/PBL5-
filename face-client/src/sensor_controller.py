@@ -158,6 +158,13 @@ class SensorController:
                 self._led_off_time = 0.0
                 logger.info("LED OFF")
     
+    def turn_led_off_immediate(self):
+        """
+        Tắt LED ngay lập tức (không chờ timeout)
+        Dùng khi nhận diện thành công
+        """
+        self._turn_led_off()
+    
     def _check_led_timeout(self):
         """Kiểm tra và tắt LED nếu hết thời gian"""
         should_turn_off = False

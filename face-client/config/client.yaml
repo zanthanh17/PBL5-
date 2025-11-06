@@ -31,6 +31,19 @@ recognition:
   max_frame_skip: 5  # Frame skip tối đa khi CPU cao
   min_frame_skip: 1  # Frame skip tối thiểu khi CPU thấp
   cpu_check_interval: 2.0  # Kiểm tra CPU mỗi N giây
+  
+  # PHASE 2 OPTIMIZATIONS
+  roi_tracking: true  # Bật ROI tracking (giảm 60-70% face detection time)
+  roi_decay: 0.9  # Confidence decay rate khi không detect được face
+  roi_min_confidence: 0.3  # Confidence tối thiểu để dùng ROI
+  roi_expand: 1.5  # Hệ số mở rộng ROI (1.5 = 150% kích thước face)
+  show_roi: false  # Hiển thị ROI rectangle để debug
+  network_compression: true  # Bật network compression (giảm 60-70% bandwidth)
+  
+  # SENSOR INTEGRATION
+  max_retries: 3  # Số lần thử lại khi nhận diện thất bại
+  recognition_timeout: 15.0  # Timeout nhận diện (giây)
+  cooldown_after_success: 5.0  # Cooldown sau khi nhận diện thành công (giây) - không detect/nhận diện trong thời gian này
 
 tts:
   enabled: true   # Bật/tắt Text-to-Speech
@@ -43,9 +56,10 @@ sensor:
   trig_pin: 23    # GPIO pin cho HC-SR04 TRIG (BCM)
   echo_pin: 24    # GPIO pin cho HC-SR04 ECHO (BCM)
   led_pin: 18     # GPIO pin cho MOSFET Gate (BCM)
-  trigger_distance: 10.0    # Khoảng cách ngưỡng (cm) - LED ON khi > ngưỡng
-  led_on_duration: 10.0     # Thời gian giữ LED sáng (giây)
+  trigger_distance: 50.0    # Khoảng cách ngưỡng (cm) - LED ON khi < ngưỡng
+  led_on_duration: 15.0     # Thời gian tối đa giữ LED sáng (giây) - sẽ tắt sớm hơn nếu nhận diện thành công
   check_interval: 0.2       # Thời gian giữa các lần đo (giây) - 0.2s = real-time
+  turn_off_on_success: true  # Tắt LED ngay khi nhận diện thành công
 
 jobs:
   poll_min_sec: 1
